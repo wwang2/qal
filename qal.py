@@ -1,61 +1,106 @@
-
 import torch
 import torch.nn.functional as F
 
 # Set random seed for reproducibility
-torch.manual_seed(42)
+# torch.manual_seed(42)
 
-# Toy Dataset: XOR-like classification
-X = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=torch.float32)
-Y = torch.tensor([0, 1, 1, 0], dtype=torch.float32)  # Binary labels
+# Generate a toy dataset: 10 samples, each with 2 features.
+num_samples = 20
+X = torch.rand((num_samples, 2), dtype=torch.float32)
+Y = (X[:, 0] > 0.5).float()  # Label: 1 if first feature > 0.5, else 0
 
-# Quantum State Initialization
-n_qubits = 2  # Small number of qubits
-hilbert_dim = 2 ** n_qubits
-psi = F.normalize(torch.randn(hilbert_dim, dtype=torch.cfloat), dim=0)  # Random initial state
+# Increase the number of qubits.
+n_qubits = 4  # For example, change this to any number.
+hilbert_dim = 2 ** n_qubits  # Dimension of the Hilbert space.
 
-# Encoding Function: Convert classical data to unitary evolution
-# Here, we use a simple diagonal Hamiltonian encoding.
-def encode_data(x):
-    H_x = torch.diag(torch.tensor([x[0], x[1], -x[0], -x[1]], dtype=torch.float32))
-    return torch.linalg.matrix_exp(-1j * H_x * torch.pi / 4)  # Simulating quantum evolution
+# Initialize a random normalized quantum state (of dimension hilbert_dim).
+psi = F.normalize(torch.randn(hilbert_dim, dtype=torch.cfloat), dim=0)
 
-# Target-Oriented Perturbation
-def target_perturbation(psi, y, eta):
+def encode_data(x, n_qubits):
+    """
+    Create a unitary operator U from a 2-dimensional sample x.
+    For a larger Hilbert space, we tile a base diagonal pattern.
+    """
+    hilbert_dim = 2 ** n_qubits
+    # Define a base pattern from the two features.
+    base_diag = torch.tensor([x[0], x[1], -x[0], -x[1]], dtype=torch.float32)
+    repeats = hilbert_dim // base_diag.shape[0]
+    diag_elements = base_diag.repeat(repeats)
+    # If hilbert_dim is not a multiple of the base pattern's length, pad with zeros.
+    if diag_elements.shape[0] < hilbert_dim:
+        pad_size = hilbert_dim - diag_elements.shape[0]
+        diag_elements = torch.cat([diag_elements, torch.zeros(pad_size, dtype=torch.float32)])
+    
+    # Create a diagonal Hamiltonian of size (hilbert_dim x hilbert_dim).
+    H_x = torch.diag(diag_elements.to(torch.cfloat))
+    
+    # Generate the unitary operator via quantum evolution:
+    # U = exp(-i * H_x * (π/4))
+    U = torch.linalg.matrix_exp(-1j * H_x * torch.pi / 4)
+    return U
+
+def measure_probability(psi_evolved, n_qubits):
+    """
+    Compute the probability of measuring label 1.
+    Here, we assume that label 1 corresponds to the measurement outcomes 
+    where the last qubit is 1 (i.e. basis indices that are odd numbers).
+    """
+    prob = 0.0
+    for i in range(len(psi_evolved)):
+        if i % 2 == 1:  # If the last bit is 1 (i.e. index is odd).
+            prob += torch.abs(psi_evolved[i])**2
+    return prob
+
+def target_perturbation(psi, y, eta, n_qubits):
+    """
+    Update the quantum state psi by nudging it toward the subspace corresponding
+    to the true label y. If y == 1, we target all basis states with an odd index;
+    if y == 0, we target those with an even index.
+    """
     P_y = torch.zeros_like(psi)
-    P_y[y] = 1  # Projection onto the correct label
-    return F.normalize((1 - eta) * psi + eta * P_y, dim=0)
+    for i in range(len(psi)):
+        if i % 2 == y:  # Even indices for label 0; odd indices for label 1.
+            P_y[i] = 1.0
+    # Normalize the projection to form a valid quantum state.
+    P_y = F.normalize(P_y, dim=0)
+    
+    # Mix the current state and the target state.
+    psi_new = (1 - eta) * psi + eta * P_y
+    # Renormalize the updated state.
+    return F.normalize(psi_new, dim=0)
 
-# Training Parameters
-eta = 0.1  # Learning rate
-num_epochs = 50
+# Training parameters.
+eta = 0.1  # Learning rate for the state update.
+num_epochs = 200
 
-# Training Loop
+# Training loop.
 for epoch in range(num_epochs):
-    total_loss = 0
-    for i in range(len(X)):
+    total_loss = 0.0
+    for i in range(num_samples):
         x, y = X[i], int(Y[i].item())
-        U_x = encode_data(x)
-        psi_evolved = U_x @ psi  # Quantum state evolution
-        
-        # Measurement (classification): Probability of measuring |1>
-        prob = torch.abs(psi_evolved[1])**2 + torch.abs(psi_evolved[3])**2
-        loss = (prob - y) ** 2  # Squared error loss
+        # Get the unitary evolution operator for the sample.
+        U = encode_data(x, n_qubits)
+        # Evolve the state.
+        psi_evolved = U @ psi
+        # Measure the probability for label 1.
+        prob = measure_probability(psi_evolved, n_qubits)
+        # Compute a simple squared error loss.
+        loss = (prob - y) ** 2  
         total_loss += loss.item()
         
-        # Target-Oriented Perturbation Step
-        psi = target_perturbation(psi, y, eta)
+        # Update psi by steering it toward the target measurement outcome.
+        psi = target_perturbation(psi_evolved, y, eta, n_qubits)
     
     if epoch % 10 == 0:
         print(f"Epoch {epoch}: Loss = {total_loss:.4f}")
 
-# Final Inference
-def predict(x):
-    U_x = encode_data(x)
-    psi_evolved = U_x @ psi
-    prob = torch.abs(psi_evolved[1])**2 + torch.abs(psi_evolved[3])**2
+# Inference function: use the final psi to predict labels.
+def predict(x, n_qubits):
+    U = encode_data(x, n_qubits)
+    psi_evolved = U @ psi
+    prob = measure_probability(psi_evolved, n_qubits)
     return 1 if prob > 0.5 else 0
 
-print("Predictions:")
-for i in range(len(X)):
-    print(f"Input {X[i].tolist()} -> Predicted: {predict(X[i])}, Actual: {Y[i].item()}")
+print("\nPredictions:")
+for i in range(num_samples):
+    print(f"Input {X[i].tolist()} -> Predicted: {predict(X[i], n_qubits)}, Actual: {int(Y[i].item())}")
