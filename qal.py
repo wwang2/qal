@@ -5,12 +5,12 @@ import torch.nn.functional as F
 # torch.manual_seed(42)
 
 # Generate a toy dataset: 10 samples, each with 2 features.
-num_samples = 20
-X = torch.rand((num_samples, 2), dtype=torch.float32)
-Y = (X[:, 0] > 0.5).float()  # Label: 1 if first feature > 0.5, else 0
+num_samples = 10
+X = torch.randint(0, 2, (num_samples, 2), dtype=torch.float32)
+Y = torch.randint(0, 2, (num_samples, 1), dtype=torch.float32)  # Label: 1 if first feature > 0.5, else 0
 
 # Increase the number of qubits.
-n_qubits = 4  # For example, change this to any number.
+n_qubits = 2  # For example, change this to any number.
 hilbert_dim = 2 ** n_qubits  # Dimension of the Hilbert space.
 
 # Initialize a random normalized quantum state (of dimension hilbert_dim).
@@ -51,23 +51,18 @@ def measure_probability(psi_evolved, n_qubits):
             prob += torch.abs(psi_evolved[i])**2
     return prob
 
-def target_perturbation(psi, y, eta, n_qubits):
+def target_perturbation(psi_evolved, y, eta, n_qubits):
     """
-    Update the quantum state psi by nudging it toward the subspace corresponding
-    to the true label y. If y == 1, we target all basis states with an odd index;
-    if y == 0, we target those with an even index.
+    Perform the target-oriented perturbation on the evolved state psi_evolved.
+    Projects psi_evolved onto the subspace where the last qubit equals y,
+    then mixes with the original evolved state according to learning rate eta.
     """
-    P_y = torch.zeros_like(psi)
-    for i in range(len(psi)):
-        if i % 2 == y:  # Even indices for label 0; odd indices for label 1.
-            P_y[i] = 1.0
-    # Normalize the projection to form a valid quantum state.
-    P_y = F.normalize(P_y, dim=0)
-    
-    # Mix the current state and the target state.
-    psi_new = (1 - eta) * psi + eta * P_y
-    # Renormalize the updated state.
-    return F.normalize(psi_new, dim=0)
+    # Project evolved state onto subspace for label y (even indices for y=0, odd for y=1)
+    proj = torch.zeros_like(psi_evolved)
+    proj[y::2] = psi_evolved[y::2]
+    # Mix original and projected states
+    psi_temp = (1 - eta) * psi_evolved + eta * proj
+    return psi_temp
 
 # Training parameters.
 eta = 0.1  # Learning rate for the state update.
@@ -87,9 +82,15 @@ for epoch in range(num_epochs):
         # Compute a simple squared error loss.
         loss = (prob - y) ** 2  
         total_loss += loss.item()
-        
-        # Update psi by steering it toward the target measurement outcome.
-        psi = target_perturbation(psi_evolved, y, eta, n_qubits)
+
+        # Perform target perturbation directly using psi_evolved
+        # Project evolved state onto label subspace and mix
+        proj = torch.zeros_like(psi_evolved)
+        proj[y::2] = psi_evolved[y::2]
+        psi_temp = (1 - eta) * psi_evolved + eta * proj
+        # Map back to original basis before next sample
+        psi = U.conj().T @ psi_temp
+        psi = F.normalize(psi, dim=0)
     
     if epoch % 10 == 0:
         print(f"Epoch {epoch}: Loss = {total_loss:.4f}")
